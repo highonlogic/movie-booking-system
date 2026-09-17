@@ -1,130 +1,111 @@
-"""In-memory seat inventory: Screens → Shows → Seats.
+"""
+seat_inventory.py
+------------------
+Data model for CoreLock's real-life application: a Movie Ticket Booking System.
 
-Working data lives in Python dicts / 2D grids (no external DB).
-Seat states: Available, Locked (held in cart), Booked (paid).
+Hierarchy: Screen -> Show -> Seat grid
+
+Each Seat has a state machine:
+    AVAILABLE -> LOCKED (S-Lock, user browsing/selecting)
+    LOCKED    -> BOOKED (X-Lock, payment confirmed / COMMIT)
+    LOCKED    -> AVAILABLE (lock released / ROLLBACK)
+    BOOKED    -> AVAILABLE (only via recovery UNDO, e.g. after a simulated crash)
+
+This module has NO threading logic of its own - it is the "database table"
+that everything else (Lock Manager, Transaction Manager, Recovery Manager)
+reads and writes.
 """
 
-from __future__ import annotations
-
-from dataclasses import dataclass, field
+import threading
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List
 
 
 class SeatState(Enum):
-    AVAILABLE = "Available"
-    LOCKED = "Locked"
-    BOOKED = "Booked"
-
-
-SeatPos = Tuple[int, int]  # (row, col) 0-indexed
+    AVAILABLE = "AVAILABLE"
+    LOCKED = "LOCKED"
+    BOOKED = "BOOKED"
 
 
 @dataclass
 class Seat:
-    row: int
-    col: int
+    seat_id: str          # e.g. "A1", "B7"
     state: SeatState = SeatState.AVAILABLE
-    held_by: Optional[str] = None  # transaction id holding a lock/booking
+    locked_by: str = None      # transaction id currently holding a lock
+    booked_by: str = None      # user who has confirmed this booking
 
-    @property
-    def label(self) -> str:
-        return f"{chr(ord('A') + self.row)}{self.col + 1}"
-
-    def to_dict(self) -> dict:
+    def snapshot(self) -> dict:
         return {
-            "row": self.row,
-            "col": self.col,
-            "label": self.label,
+            "seat_id": self.seat_id,
             "state": self.state.value,
-            "held_by": self.held_by,
+            "locked_by": self.locked_by,
+            "booked_by": self.booked_by,
         }
 
 
-@dataclass
 class Show:
-    show_id: str
-    movie: str
-    start_time: str
-    screen_id: str
-    rows: int
-    cols: int
-    seats: List[List[Seat]] = field(default_factory=list)
+    """A single showtime on a screen, with its own seat grid."""
 
-    def __post_init__(self) -> None:
-        if not self.seats:
-            self.seats = [
-                [Seat(r, c) for c in range(self.cols)] for r in range(self.rows)
-            ]
+    def __init__(self, show_id: str, movie: str, time: str, rows: int = 5, cols: int = 6):
+        self.show_id = show_id
+        self.movie = movie
+        self.time = time
+        self.rows = rows
+        self.cols = cols
+        self._lock = threading.Lock()  # protects the seats dict itself (structural safety net)
+        self.seats: Dict[str, Seat] = {}
+        for r in range(rows):
+            row_letter = chr(ord("A") + r)
+            for c in range(1, cols + 1):
+                seat_id = f"{row_letter}{c}"
+                self.seats[seat_id] = Seat(seat_id=seat_id)
 
-    def get_seat(self, row: int, col: int) -> Seat:
-        if not (0 <= row < self.rows and 0 <= col < self.cols):
-            raise IndexError(f"Seat ({row}, {col}) is outside the {self.rows}x{self.cols} grid")
-        return self.seats[row][col]
+    def get_seat(self, seat_id: str) -> Seat:
+        with self._lock:
+            return self.seats.get(seat_id)
 
-    def snapshot(self) -> List[List[str]]:
-        return [[seat.state.value for seat in row] for row in self.seats]
-
-    def counts(self) -> Dict[str, int]:
-        tally = {s.value: 0 for s in SeatState}
-        for row in self.seats:
-            for seat in row:
-                tally[seat.state.value] += 1
-        return tally
+    def seat_grid_snapshot(self) -> List[dict]:
+        with self._lock:
+            return [s.snapshot() for s in self.seats.values()]
 
 
-@dataclass
 class Screen:
-    screen_id: str
-    name: str
-    rows: int = 10
-    cols: int = 10
+    """A physical screen that can host multiple shows (different times)."""
 
-
-class SeatInventory:
-    """Cinema inventory used by the Transaction Manager as the 'database'."""
-
-    def __init__(self) -> None:
-        self.screens: Dict[str, Screen] = {}
+    def __init__(self, screen_id: str):
+        self.screen_id = screen_id
         self.shows: Dict[str, Show] = {}
 
-    def add_screen(self, screen_id: str, name: str, rows: int = 10, cols: int = 10) -> Screen:
-        screen = Screen(screen_id=screen_id, name=name, rows=rows, cols=cols)
-        self.screens[screen_id] = screen
-        return screen
-
-    def add_show(
-        self,
-        show_id: str,
-        movie: str,
-        start_time: str,
-        screen_id: str,
-    ) -> Show:
-        if screen_id not in self.screens:
-            raise KeyError(f"Unknown screen '{screen_id}'")
-        screen = self.screens[screen_id]
-        show = Show(
-            show_id=show_id,
-            movie=movie,
-            start_time=start_time,
-            screen_id=screen_id,
-            rows=screen.rows,
-            cols=screen.cols,
-        )
-        self.shows[show_id] = show
-        return show
+    def add_show(self, show: Show):
+        self.shows[show.show_id] = show
 
     def get_show(self, show_id: str) -> Show:
-        if show_id not in self.shows:
-            raise KeyError(f"Unknown show '{show_id}'")
-        return self.shows[show_id]
+        return self.shows.get(show_id)
 
-    def seed_demo_cinema(self) -> None:
-        """One screen, one popular show, 10x10 grid — sized for a live demo."""
-        self.add_screen("SCR-1", "Audi 1", rows=10, cols=10)
-        self.add_show(
-            show_id="SHOW-1",
-            movie="CoreLock: The Premiere",
-            start_time="19:00",
-            screen_id="SCR-1",
-        )
+
+class Cinema:
+    """Top-level container: a set of screens. This is CoreLock's whole 'database'."""
+
+    def __init__(self):
+        self.screens: Dict[str, Screen] = {}
+
+    def add_screen(self, screen: Screen):
+        self.screens[screen.screen_id] = screen
+
+    def get_show(self, show_id: str) -> Show:
+        for screen in self.screens.values():
+            show = screen.get_show(show_id)
+            if show:
+                return show
+        return None
+
+    @classmethod
+    def seed_demo_data(cls) -> "Cinema":
+        """Creates one screen with one show, used by main.py's demo."""
+        cinema = cls()
+        screen = Screen("Screen-1")
+        show = Show(show_id="S101", movie="Inception", time="7:00 PM", rows=5, cols=6)
+        screen.add_show(show)
+        cinema.add_screen(screen)
+        return cinema

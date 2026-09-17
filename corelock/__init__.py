@@ -1,4 +1,8 @@
-"""CoreLock: transaction scheduling and concurrency control for movie ticket booking."""
+"""
+CoreLock: Simulating Transaction Scheduling and Concurrency Control
+
+A combined OS + DBMS simulation modeled on a Movie Ticket Booking System.
+See PROJECT_CONTEXT.md at the repo root for the full design.
+"""
 
 __version__ = "0.1.0"
-__project__ = "OSDBMS-V-2026-T235"
